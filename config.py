@@ -22,12 +22,12 @@ API_RATE_WINDOW = int(os.getenv("API_RATE_WINDOW", "60"))       # seconds
 MESSAGE_RATE_LIMIT = int(os.getenv("MESSAGE_RATE_LIMIT", "3"))  # messages per window
 MESSAGE_RATE_WINDOW = int(os.getenv("MESSAGE_RATE_WINDOW", "300"))  # 5 minutes
 
-# Database path — uses /data/ for persistent storage on Railway/Render
-_default_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "website.db")
-# In production, prefer /data/ for persistence across redeploys
+# Data directory for JSON file storage
+# In production, use /data/ for Railway persistent volume
+_default_data = os.path.dirname(os.path.abspath(__file__))
 if os.getenv("PRODUCTION", "").lower() in ("1", "true", "yes"):
-    _default_db = "/data/website.db"
-DB_PATH = os.getenv("DB_PATH", _default_db)
+    _default_data = "/data"
+DB_PATH = os.getenv("DB_PATH", _default_data)
 
 # Production mode
 PRODUCTION = os.getenv("PRODUCTION", "").lower() in ("1", "true", "yes")

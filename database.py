@@ -1,44 +1,46 @@
-import sqlite3
-import hashlib
 import os
 import json
-from datetime import datetime
+import hashlib
+from threading import Lock
 import config
 
-DB_PATH = config.DB_PATH
+DATA_DIR = os.path.dirname(config.DB_PATH) or "."
+os.makedirs(DATA_DIR, exist_ok=True)
+
+_users_file = os.path.join(DATA_DIR, "users.json")
+_messages_file = os.path.join(DATA_DIR, "messages.json")
+_content_file = os.path.join(DATA_DIR, "content.json")
+
+_lock = Lock()
 
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _read(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
+def _write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+# ===== Init =====
 def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            message TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-            is_read INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS content (
-            section_key TEXT PRIMARY KEY,
-            data TEXT NOT NULL
-        );
-    """)
-    conn.commit()
-    conn.close()
+    with _lock:
+        if not os.path.exists(_users_file):
+            _write(_users_file, {})
+        if not os.path.exists(_messages_file):
+            _write(_messages_file, [])
+        if not os.path.exists(_content_file):
+            _write(_content_file, {})
 
 
+# ===== Auth =====
 def hash_password(password: str) -> str:
     salt = os.urandom(16).hex()
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
@@ -46,119 +48,111 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
-    salt, dk_hex = stored.split("$")
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
-    return dk.hex() == dk_hex
+    try:
+        salt, dk_hex = stored.split("$")
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+        return dk.hex() == dk_hex
+    except ValueError:
+        return False
 
 
 def create_admin(username: str, password: str):
-    conn = get_db()
-    conn.execute(
-        "INSERT OR IGNORE INTO admin (username, password_hash) VALUES (?, ?)",
-        (username, hash_password(password)),
-    )
-    conn.commit()
-    conn.close()
+    with _lock:
+        users = _read(_users_file)
+        if username not in users:
+            users[username] = hash_password(password)
+            _write(_users_file, users)
 
 
 def verify_admin(username: str, password: str) -> bool:
-    conn = get_db()
-    row = conn.execute("SELECT password_hash FROM admin WHERE username = ?", (username,)).fetchone()
-    conn.close()
-    if not row:
+    users = _read(_users_file)
+    stored = users.get(username)
+    if not stored:
         return False
-    return verify_password(password, row["password_hash"])
+    return verify_password(password, stored)
 
 
 def get_admin_username() -> str | None:
-    conn = get_db()
-    row = conn.execute("SELECT username FROM admin LIMIT 1").fetchone()
-    conn.close()
-    return row["username"] if row else None
+    users = _read(_users_file)
+    return next(iter(users.keys()), None) if users else None
 
 
 def update_password(username: str, new_password: str):
-    conn = get_db()
-    conn.execute(
-        "UPDATE admin SET password_hash = ? WHERE username = ?",
-        (hash_password(new_password), username),
-    )
-    conn.commit()
-    conn.close()
+    with _lock:
+        users = _read(_users_file)
+        if username in users:
+            users[username] = hash_password(new_password)
+            _write(_users_file, users)
 
 
 def update_username(old_username: str, new_username: str):
-    conn = get_db()
-    conn.execute(
-        "UPDATE admin SET username = ? WHERE username = ?",
-        (new_username, old_username),
-    )
-    conn.commit()
-    conn.close()
+    with _lock:
+        users = _read(_users_file)
+        if old_username in users:
+            users[new_username] = users.pop(old_username)
+            _write(_users_file, users)
 
 
+# ===== Messages =====
 def save_message(name: str, email: str, message: str):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO messages (name, email, message) VALUES (?, ?, ?)",
-        (name, email, message),
-    )
-    conn.commit()
-    conn.close()
+    with _lock:
+        msgs = _read(_messages_file)
+        import time
+        msgs.append({
+            "id": int(time.time() * 1000000),
+            "name": name,
+            "email": email,
+            "message": message,
+            "created_at": _now(),
+            "is_read": False,
+        })
+        _write(_messages_file, msgs)
 
 
 def get_messages(limit: int = 50, offset: int = 0):
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM messages ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (limit, offset),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    msgs = _read(_messages_file)
+    msgs.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+    return msgs[offset:offset + limit]
 
 
-def get_unread_count():
-    conn = get_db()
-    row = conn.execute("SELECT COUNT(*) as c FROM messages WHERE is_read = 0").fetchone()
-    conn.close()
-    return row["c"]
+def get_unread_count() -> int:
+    msgs = _read(_messages_file)
+    return sum(1 for m in msgs if not m.get("is_read"))
 
 
 def mark_read(msg_id: int):
-    conn = get_db()
-    conn.execute("UPDATE messages SET is_read = 1 WHERE id = ?", (msg_id,))
-    conn.commit()
-    conn.close()
+    with _lock:
+        msgs = _read(_messages_file)
+        for m in msgs:
+            if m["id"] == msg_id:
+                m["is_read"] = True
+        _write(_messages_file, msgs)
 
 
 def delete_message(msg_id: int):
-    conn = get_db()
-    conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
-    conn.commit()
-    conn.close()
+    with _lock:
+        msgs = _read(_messages_file)
+        msgs = [m for m in msgs if m["id"] != msg_id]
+        _write(_messages_file, msgs)
 
 
+# ===== Content =====
 def get_content(section_key: str) -> dict | None:
-    conn = get_db()
-    row = conn.execute("SELECT data FROM content WHERE section_key = ?", (section_key,)).fetchone()
-    conn.close()
-    if row:
-        return json.loads(row["data"])
-    return None
+    data = _read(_content_file)
+    return data.get(section_key)
 
 
 def save_content(section_key: str, data: dict):
-    conn = get_db()
-    conn.execute(
-        "INSERT OR REPLACE INTO content (section_key, data) VALUES (?, ?)",
-        (section_key, json.dumps(data, ensure_ascii=False)),
-    )
-    conn.commit()
-    conn.close()
+    with _lock:
+        all_data = _read(_content_file)
+        all_data[section_key] = data
+        _write(_content_file, all_data)
 
 
-def get_all_content():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM content").fetchall()
-    conn.close()
-    return {r["section_key"]: json.loads(r["data"]) for r in rows}
+def get_all_content() -> dict:
+    return _read(_content_file)
+
+
+def _now():
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
