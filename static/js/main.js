@@ -195,11 +195,19 @@ async function loadDynamicContent() {
         // Contact
         if (data.contact) {
             const c = data.contact;
-            const items = document.querySelectorAll('#page-contact .contact-item div:last-child');
-            // Order: email, phone, qq, github, location
-            const fields = ['email', 'phone', 'qq', 'github', 'location'];
-            fields.forEach((field, i) => {
-                if (c[field] && items[i]) items[i].textContent = c[field];
+            const fields = ['email', 'phone', 'location', 'qq', 'github'];
+            const items = document.querySelectorAll('#page-contact .contact-item');
+            items.forEach(item => {
+                const label = item.querySelector('.contact-label');
+                if (!label) return;
+                const labelText = label.textContent.trim();
+                const valueDiv = item.querySelector('.contact-label + div');
+                if (!valueDiv) return;
+                for (const f of fields) {
+                    const map = { '邮箱': 'email', '电话': 'phone', '所在地': 'location', 'QQ': 'qq', 'GitHub': 'github' };
+                    const key = map[labelText];
+                    if (key && c[key]) valueDiv.textContent = c[key];
+                }
             });
         }
     } catch (e) {
